@@ -4,9 +4,11 @@ on:
   workflow_run:
     workflows: [Upstream Sync]
     types: [completed]
+
   push:
     tags:
       - "*"
+
   workflow_dispatch:
 
 jobs:
@@ -17,34 +19,60 @@ jobs:
       contents: write
 
     steps:
+      # ----------------------------------------
+      # Checkout
+      # ----------------------------------------
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: pnpm
-
+      # ----------------------------------------
+      # Install pnpm FIRST
+      # setup-node cache: pnpm requires pnpm
+      # to already exist in PATH
+      # ----------------------------------------
       - name: Install pnpm
         uses: pnpm/action-setup@v5
         with:
           version: 10
           run_install: false
 
-      # Разрешаем lifecycle-скрипты нужных пакетов
-      - name: Configure pnpm build scripts
-        run: |
-          pnpm config set only-built-dependencies "esbuild,workerd,core-js-pure,es5-ext"
+      # ----------------------------------------
+      # Install Node.js
+      # ----------------------------------------
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
 
+      # ----------------------------------------
+      # Show versions
+      # ----------------------------------------
+      - name: Check environment
+        run: |
+          echo "Node:"
+          node --version
+
+          echo "npm:"
+          npm --version
+
+          echo "pnpm:"
+          pnpm --version
+
+      # ----------------------------------------
+      # Deploy
+      # ----------------------------------------
       - name: Deploy Backend for ${{ github.ref_name }}
         shell: bash
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
           WRANGLER_TOML_CONTENT: ${{ secrets.BACKEND_TOML }}
+
           USE_WORKER_ASSETS: ${{ secrets.USE_WORKER_ASSETS }}
           USE_WORKER_ASSETS_WITH_TELEGRAM: ${{ secrets.USE_WORKER_ASSETS_WITH_TELEGRAM }}
+
           DEBUG_MODE: ${{ secrets.DEBUG_MODE }}
           BACKEND_USE_MAIL_WASM_PARSER: ${{ secrets.BACKEND_USE_MAIL_WASM_PARSER }}
 
@@ -52,76 +80,122 @@ jobs:
           set -e
 
           echo "========================================"
-          echo "Starting deployment"
+          echo "Starting backend deployment"
           echo "========================================"
 
-          # -----------------------------
+          # ----------------------------------------
           # Frontend
-          # -----------------------------
+          # ----------------------------------------
           if [ -n "$USE_WORKER_ASSETS" ]; then
-            echo "Building frontend..."
+            echo ""
+            echo "========================================"
+            echo "Building frontend"
+            echo "========================================"
 
             cd frontend/
 
+            echo "Installing frontend dependencies..."
             pnpm install --no-frozen-lockfile
 
             if [ -n "$USE_WORKER_ASSETS_WITH_TELEGRAM" ]; then
-              echo "Building with telegram pages"
+              echo "Building with Telegram pages..."
               pnpm build:telegram:pages
             else
-              echo "Building with normal pages"
+              echo "Building normal pages..."
               pnpm build:pages
             fi
 
             cd ..
+
+            echo "Frontend build completed."
           else
-            echo "Frontend build skipped"
+            echo "Frontend build skipped."
           fi
 
-          # -----------------------------
+          # ----------------------------------------
           # Backend
-          # -----------------------------
-          echo "Installing backend dependencies..."
+          # ----------------------------------------
+          echo ""
+          echo "========================================"
+          echo "Preparing backend"
+          echo "========================================"
 
           cd worker/
 
-          # Проверяем, что конфигурация действительно существует
+          # ----------------------------------------
+          # Check Cloudflare configuration
+          # ----------------------------------------
           if [ -z "$WRANGLER_TOML_CONTENT" ]; then
-            echo "ERROR: BACKEND_TOML secret is empty"
+            echo "ERROR: BACKEND_TOML secret is empty."
             exit 1
           fi
 
+          if [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "ERROR: CLOUDFLARE_ACCOUNT_ID secret is empty."
+            exit 1
+          fi
+
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "ERROR: CLOUDFLARE_API_TOKEN secret is empty."
+            exit 1
+          fi
+
+          # ----------------------------------------
+          # Create wrangler.toml
+          # ----------------------------------------
+          echo "Creating wrangler.toml..."
+
           printf '%s\n' "$WRANGLER_TOML_CONTENT" > wrangler.toml
 
-          echo "wrangler.toml created"
+          if [ ! -s wrangler.toml ]; then
+            echo "ERROR: wrangler.toml was not created correctly."
+            exit 1
+          fi
+
+          echo "wrangler.toml created successfully."
+
+          # ----------------------------------------
+          # Install backend dependencies
+          # ----------------------------------------
+          echo ""
+          echo "Installing backend dependencies..."
 
           pnpm install --no-frozen-lockfile
 
-          # -----------------------------
-          # Mail parser
-          # -----------------------------
+          # ----------------------------------------
+          # Optional mail parser
+          # ----------------------------------------
           if [ -n "$BACKEND_USE_MAIL_WASM_PARSER" ]; then
-            echo "Using mail-parser-wasm-worker"
+            echo ""
+            echo "Using mail-parser-wasm-worker..."
 
             pnpm add mail-parser-wasm-worker
 
             git apply ../.github/config/mail-parser-wasm-worker.patch
 
-            echo "Applied mail-parser-wasm-worker patch"
+            echo "Applied mail-parser-wasm-worker patch."
           fi
 
-          # -----------------------------
+          # ----------------------------------------
           # Deploy
-          # -----------------------------
+          # ----------------------------------------
+          echo ""
           echo "========================================"
-          echo "Running deploy..."
+          echo "Running Cloudflare deployment"
           echo "========================================"
 
-          # НЕ скрываем вывод!
+          # IMPORTANT:
+          # Do not redirect stdout/stderr to /dev/null.
+          # If Wrangler fails, GitHub Actions will now show
+          # the actual error.
           pnpm run deploy
 
+          # ----------------------------------------
+          # Success
+          # ----------------------------------------
+          echo ""
           echo "========================================"
-          echo "Deploy completed successfully"
+          echo "Deployment completed successfully"
           echo "========================================"
 
-          echo "Deployed for tag ${{ github.ref_name }}"
+          echo "Deployed for tag: ${{ github.ref_name }}"
